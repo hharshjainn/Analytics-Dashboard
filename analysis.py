@@ -15,43 +15,77 @@ RAW_PATH = "ecommerce_orders.csv"
 
 @st.cache_data(show_spinner="Loading & cleaning data…")
 def load_and_clean(path: str = RAW_PATH) -> pd.DataFrame:
-    df = pd.read_csv(path, low_memory=False)
+    # ── Identify columns needed before reading ────────────────────────────────
+    all_cols = pd.read_csv(path, nrows=0).columns.tolist()
+    qty_cols  = [c for c in all_cols if c.startswith("line_items") and c.endswith(".quantity")]
+    disc_cols = [c for c in all_cols if c.startswith("discount_applications") and c.endswith(".title")]
+    # Only read the columns the app actually needs — skip all line_items[*].id
+    keep_cols = ["created_at", "customer.id"] + qty_cols + disc_cols
 
-    # Parse dates (mixed UTC offsets)
+    # ── Read with optimal dtypes upfront ─────────────────────────────────────
+    # Quantity cols: read as float32 (they're sparse/nullable floats in CSV)
+    dtype_map = {c: "float32" for c in qty_cols}
+    # Discount title cols: category saves ~80% vs object
+    dtype_map.update({c: "category" for c in disc_cols})
+
+    df = pd.read_csv(
+        path,
+        usecols=keep_cols,
+        dtype=dtype_map,
+        low_memory=False,
+    )
+
+    # ── Parse dates ───────────────────────────────────────────────────────────
     df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
 
-    # Drop rows with missing essential keys
+    # ── Drop rows with missing essential keys ─────────────────────────────────
     df = df.dropna(subset=["created_at", "customer.id"]).copy()
     df = df.drop_duplicates()
 
+    # customer_id as int64 (values like 6509306970261 exceed int32 range)
     df["customer_id"] = df["customer.id"].astype("int64")
+    del df["customer.id"]          # redundant after int conversion
 
-    # Basket size = sum of all line-item quantities
-    qty_cols = [c for c in df.columns if c.startswith("line_items") and c.endswith(".quantity")]
-    df["basket_size"] = df[qty_cols].sum(axis=1, skipna=True)
+    # ── Basket size ───────────────────────────────────────────────────────────
+    df["basket_size"] = df[qty_cols].sum(axis=1, skipna=True).astype("float32")
+    # Drop quantity columns after basket_size is computed — not used downstream
+    df.drop(columns=qty_cols, inplace=True)
 
-    # Discount info
-    disc_cols = [c for c in df.columns if c.startswith("discount_applications") and c.endswith(".title")]
+    # ── Discount info ─────────────────────────────────────────────────────────
     if disc_cols:
-        df["first_discount_title"] = df[disc_cols].bfill(axis=1).iloc[:, 0]
+        # bfill across discount title columns to get first non-null
+        # Work on string representation to support category dtype
+        disc_df = df[disc_cols].apply(lambda s: s.astype(object))
+        df["first_discount_title"] = disc_df.bfill(axis=1).iloc[:, 0].astype("category")
     else:
-        df["first_discount_title"] = np.nan
+        df["first_discount_title"] = pd.Categorical([np.nan] * len(df))
 
     df["has_discount"] = df["first_discount_title"].notna()
 
-    # ── Exclude internal/non-promotional discount codes ──
+    # Drop individual discount title columns — only first_discount_title is used
+    df.drop(columns=disc_cols, inplace=True)
+
+    # ── Exclude internal/non-promotional discount codes ───────────────────────
     _EXCLUDED_DISCOUNTS = {
         "amazon replacement order",
         "verified reviews order",
     }
-    # Case-insensitive strip: null out any title that matches after lowercasing
-    mask_excluded = df["first_discount_title"].str.strip().str.lower().isin(_EXCLUDED_DISCOUNTS)
+    mask_excluded = (
+        df["first_discount_title"]
+        .astype(str).str.strip().str.lower()
+        .isin(_EXCLUDED_DISCOUNTS)
+    )
     df.loc[mask_excluded, "first_discount_title"] = np.nan
     df.loc[mask_excluded, "has_discount"] = False
 
-    # Order rank per customer
+    # Re-cast to category after nulling out excluded values
+    df["first_discount_title"] = df["first_discount_title"].astype("category")
+
+    # ── Order rank per customer ───────────────────────────────────────────────
     df = df.sort_values(["customer_id", "created_at"]).reset_index(drop=True)
-    df["order_rank"] = df.groupby("customer_id").cumcount() + 1
+    df["order_rank"] = (
+        df.groupby("customer_id").cumcount() + 1
+    ).astype("int32")
 
     return df
 
@@ -73,7 +107,9 @@ def build_first_orders(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     median_basket = fo["first_basket_size"].median()
-    fo["basket_segment"] = np.where(fo["first_basket_size"] > median_basket, "Large Basket", "Small Basket")
+    fo["basket_segment"] = pd.Categorical(
+        np.where(fo["first_basket_size"] > median_basket, "Large Basket", "Small Basket")
+    )
 
     return fo
 
