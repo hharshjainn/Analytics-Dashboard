@@ -56,52 +56,58 @@ inject_css()
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def get_base_data():
-    """
-    Load, clean and build first-orders table.
-    Returns only the lightweight metadata needed for the sidebar,
-    plus the two core DataFrames for downstream computation.
-    The heavy df is NOT returned — callers should use get_all_filtered_data().
-    """
+    """Load and clean raw data only — fast, cached once."""
     df           = load_and_clean()
     first_orders = build_first_orders(df)
-    # Sidebar metadata — tiny objects
-    date_min      = df["created_at"].min()
-    date_max      = df["created_at"].max()
-    total_orders  = len(df)
-    total_cust    = first_orders["customer_id"].nunique()
-    disc_titles   = sorted(df["first_discount_title"].dropna().unique().tolist())
-    return date_min, date_max, total_orders, total_cust, disc_titles
+    return df, first_orders
 
 
 @st.cache_data(show_spinner=False)
-def get_all_filtered_data():
+def get_all_filtered_data(
+    disc_type_filter: str,
+    basket_filter: str,
+):
     """
-    Compute ALL derived metric tables from the full dataset.
-    Returns only small summary DataFrames — NOT the raw orders df.
+    Compute ALL derived metrics for a given filter combination.
+    Cached per unique (disc_type, basket) pair — filters just hit cache on re-renders.
     """
-    df           = load_and_clean()
-    first_orders = build_first_orders(df)
+    df, first_orders = get_base_data()
 
-    # Build all derived tables
-    t2o_f                         = build_t2o(df, first_orders)
-    rpr_f                         = build_rpr_table(df, first_orders)
-    cohort_counts_f, cohort_pct_f = build_cohort_matrix(df, first_orders)
-    disc_sum_f                    = build_segment_summary(
-        t2o_f, first_orders, df, "first_order_discount",
+    # Apply filters
+    df_f           = df
+    first_orders_f = first_orders
+
+    if disc_type_filter != "All":
+        matching = first_orders_f[
+            first_orders_f["first_order_discount_title"] == disc_type_filter
+        ]["customer_id"]
+        df_f           = df_f[df_f["customer_id"].isin(matching)]
+        first_orders_f = first_orders_f[first_orders_f["customer_id"].isin(matching)]
+
+    if basket_filter != "All":
+        matching = first_orders_f[
+            first_orders_f["basket_segment"] == basket_filter
+        ]["customer_id"]
+        df_f           = df_f[df_f["customer_id"].isin(matching)]
+        first_orders_f = first_orders_f[first_orders_f["customer_id"].isin(matching)]
+
+    # Build all derived tables once
+    t2o_f             = build_t2o(df_f, first_orders_f)
+    rpr_f             = build_rpr_table(df_f, first_orders_f)
+    cohort_counts_f, cohort_pct_f = build_cohort_matrix(df_f, first_orders_f)
+    disc_sum_f        = build_segment_summary(
+        t2o_f, first_orders_f, df_f, "first_order_discount",
         label_map={True: "Used Discount", False: "No Discount"},
     )
-    basket_sum_f    = build_segment_summary(t2o_f, first_orders, df, "basket_segment")
-    disc_type_f     = build_discount_type_summary(t2o_f, first_orders, df)
-    bd_f            = build_basket_discount_analysis(first_orders, df, t2o_f)
-    basket_detail_f = build_basket_segment_detail(first_orders, df, t2o_f)
-    median_basket   = first_orders["first_basket_size"].median()
+    basket_sum_f      = build_segment_summary(t2o_f, first_orders_f, df_f, "basket_segment")
+    disc_type_f       = build_discount_type_summary(t2o_f, first_orders_f, df_f)
+    bd_f              = build_basket_discount_analysis(first_orders_f, df_f, t2o_f)
+    basket_detail_f   = build_basket_segment_detail(first_orders_f, df_f, t2o_f)
 
-    # Only return small derived tables — drop the large raw frames
     return (
-        t2o_f, rpr_f,
+        df_f, first_orders_f, t2o_f, rpr_f,
         cohort_counts_f, cohort_pct_f,
         disc_sum_f, basket_sum_f, disc_type_f, bd_f, basket_detail_f,
-        median_basket,
     )
 
 
@@ -122,7 +128,8 @@ try:
         """,
         unsafe_allow_html=True,
     )
-    date_min, date_max, total_orders, total_cust, disc_titles = get_base_data()
+    # Load raw data first (fast, enables sidebar to render)
+    df, first_orders = get_base_data()
     loading_placeholder.empty()
     data_loaded = True
 except FileNotFoundError:
@@ -141,15 +148,17 @@ with st.sidebar:
     st.markdown("---")
 
     if data_loaded:
-        n_months = (date_max - date_min).days / 30.44
+        date_min = df["created_at"].min().date()
+        date_max = df["created_at"].max().date()
+        n_months = (df["created_at"].max() - df["created_at"].min()).days / 30.44
 
         st.markdown("#### 📁 Dataset Overview")
         st.markdown(
             f"""
             <div style='font-size:13px;line-height:2;color:var(--c-text-muted);'>
-            📅 <b style='color:#C7D2FE;'>Date range:</b> {date_min.date()} → {date_max.date()}<br>
-            👥 <b style='color:#C7D2FE;'>Customers:</b> {total_cust:,}<br>
-            🛒 <b style='color:#C7D2FE;'>Total orders:</b> {total_orders:,}<br>
+            📅 <b style='color:#C7D2FE;'>Date range:</b> {date_min} → {date_max}<br>
+            👥 <b style='color:#C7D2FE;'>Customers:</b> {first_orders['customer_id'].nunique():,}<br>
+            🛒 <b style='color:#C7D2FE;'>Total orders:</b> {len(df):,}<br>
             📆 <b style='color:#C7D2FE;'>Span:</b> ~{n_months:.0f} months
             </div>
             """,
@@ -180,16 +189,13 @@ if not data_loaded:
     st.stop()
 
 
-# ── Resolve all derived data from cache (single call) ─────────────────────────
-(t2o_f, rpr_f_base,
+# ── Resolve all filtered data from cache (single call) ────────────────────────
+(df_f, first_orders_f, t2o_f, rpr_f_base,
  cohort_counts_f_base, cohort_pct_f_base,
  disc_sum_f_base, basket_sum_f_base, disc_type_f_base, bd_f_base,
- basket_detail_f_base, median_basket_f) = get_all_filtered_data()
+ basket_detail_f_base) = get_all_filtered_data("All", "All")
 
-# Convenience aliases used throughout tabs
-df_f           = None   # not held in memory — all metrics pre-computed above
-first_orders_f = None   # same
-
+# Cohort month range slider (now that cohort_pct_f_base is available)
 cohort_months = sorted(cohort_pct_f_base.index.astype(str).tolist())
 with st.sidebar:
     if data_loaded:
@@ -239,9 +245,9 @@ with tabs[0]:
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
-        metric_card("Total Orders", f"{total_orders:,}", icon="🛒")
+        metric_card("Total Orders", f"{len(df_f):,}", icon="🛒")
     with c2:
-        metric_card("Unique Customers", f"{total_cust:,}", icon="👥")
+        metric_card("Unique Customers", f"{first_orders_f['customer_id'].nunique():,}", icon="👥")
     with c3:
         metric_card("30-day RPR", fmt_pct(rpr_dict.get(30, 0)), icon="🔁")
     with c4:
@@ -273,7 +279,7 @@ with tabs[0]:
 
     with col_right:
         # Funnel: new → repeat30 → repeat60 → repeat90
-        total_c = total_cust
+        total_c = first_orders_f["customer_id"].nunique()
         funnel_vals = [
             total_c,
             int(rpr_dict.get(30, 0) / 100 * total_c),
@@ -293,16 +299,16 @@ with tabs[0]:
 
     # Summary paragraph
     st.markdown("---")
-    n_months_f = (date_max - date_min).days / 30.44
+    n_months_f = (df_f["created_at"].max() - df_f["created_at"].min()).days / 30.44
     bd_exec = bd_f_base
     st.info(
-        f"**Dataset:** {total_orders:,} orders from {total_cust:,} "
+        f"**Dataset:** {len(df_f):,} orders from {first_orders_f['customer_id'].nunique():,} "
         f"customers over ~{n_months_f:.0f} months "
-        f"({date_min.date()} → {date_max.date()}).  "
+        f"({df_f['created_at'].min().date()} → {df_f['created_at'].max().date()}).  "
         f"**Median time to second order:** {med_t2o:.0f} days "
         f"(P25={p25_t2o:.0f}d, P75={p75_t2o:.0f}d).  "
         f"**Share with discounted first order:** "
-        f"{bd_exec['lb_disc_pct'] * bd_exec['lb_total'] / (bd_exec['lb_total'] + bd_exec['sb_total']):.1f}%.  "
+        f"{first_orders_f['first_order_discount'].mean()*100:.1f}%.  "
         f"**Large Basket discount rate:** {bd_exec['lb_disc_pct']:.1f}% vs "
         f"{bd_exec['sb_disc_pct']:.1f}% for Small Basket — "
         f"{'large-basket customers are more discount-dependent' if bd_exec['lb_disc_pct'] > bd_exec['sb_disc_pct'] else 'discount usage is similar across basket sizes'}."
@@ -443,9 +449,9 @@ with tabs[2]:
 
     with col_r:
         # Waterfall: incremental repeaters between windows
-        r30 = int(rpr_dict_f.get(30, 0) / 100 * total_cust)
-        r60 = int(rpr_dict_f.get(60, 0) / 100 * total_cust)
-        r90 = int(rpr_dict_f.get(90, 0) / 100 * total_cust)
+        r30 = int(rpr_dict_f.get(30, 0) / 100 * first_orders_f["customer_id"].nunique())
+        r60 = int(rpr_dict_f.get(60, 0) / 100 * first_orders_f["customer_id"].nunique())
+        r90 = int(rpr_dict_f.get(90, 0) / 100 * first_orders_f["customer_id"].nunique())
         fig_wf = go.Figure(go.Waterfall(
             orientation="v",
             measure=["absolute", "relative", "relative", "total"],
@@ -490,7 +496,7 @@ with tabs[3]:
         med_f  = t2o_f["days_to_second_order"].median()
         p25_f  = t2o_f["days_to_second_order"].quantile(0.25)
         p75_f  = t2o_f["days_to_second_order"].quantile(0.75)
-        repeat_share = len(t2o_f) / total_cust * 100
+        repeat_share = len(t2o_f) / first_orders_f["customer_id"].nunique() * 100
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -853,6 +859,7 @@ with tabs[6]:
     basket_sum_f    = basket_sum_f_base
     basket_detail_f = basket_detail_f_base
     bd_basket       = bd_f_base
+    median_basket_f = first_orders_f["first_basket_size"].median()
 
     if basket_sum_f.empty:
         st.warning("Not enough data under the current filter selection.")
@@ -974,6 +981,20 @@ with tabs[6]:
                      xaxis_title="Discount Used", yaxis_title="Basket Segment")
         fig_hm.update_layout(height=300)
         st.plotly_chart(fig_hm, use_container_width=True, key="bask6_heatmap")
+
+        # ── Basket size distribution ──────────────────────────────────────────
+        with st.expander("📊 First-Order Basket Size Distribution"):
+            fig_bask_dist = px.histogram(
+                first_orders_f, x="first_basket_size", nbins=40,
+                color="basket_segment",
+                color_discrete_sequence=[PALETTE["primary"], PALETTE["success"]],
+                labels={"first_basket_size": "First Order Basket Size (units)"},
+                barmode="overlay", opacity=0.75,
+            )
+            apply_layout(fig_bask_dist, "Distribution of First-Order Basket Sizes",
+                         xaxis_title="Units", yaxis_title="Customer Count")
+            fig_bask_dist.update_layout(height=340)
+            st.plotly_chart(fig_bask_dist, use_container_width=True, key="bask_dist_hist")
 
         # ── Observations ──────────────────────────────────────────────────────
         st.markdown("#### 💡 Observations")
