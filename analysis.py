@@ -44,7 +44,6 @@ def load_and_clean(path: str = RAW_PATH) -> pd.DataFrame:
         "amazon replacement order",
         "verified reviews order",
     }
-    # Case-insensitive strip: null out any title that matches after lowercasing
     mask_excluded = df["first_discount_title"].str.strip().str.lower().isin(_EXCLUDED_DISCOUNTS)
     df.loc[mask_excluded, "first_discount_title"] = np.nan
     df.loc[mask_excluded, "has_discount"] = False
@@ -52,6 +51,18 @@ def load_and_clean(path: str = RAW_PATH) -> pd.DataFrame:
     # Order rank per customer
     df = df.sort_values(["customer_id", "created_at"]).reset_index(drop=True)
     df["order_rank"] = df.groupby("customer_id").cumcount() + 1
+
+    # ── Keep only the columns needed downstream — drop all raw Shopify columns ──
+    keep = ["customer_id", "created_at", "basket_size",
+            "has_discount", "first_discount_title", "order_rank"]
+    df = df[keep].copy()
+
+    # Downcast types to reduce memory
+    df["customer_id"]  = df["customer_id"].astype("int32")
+    df["basket_size"]  = df["basket_size"].astype("float32")
+    df["order_rank"]   = df["order_rank"].astype("int16")
+    df["has_discount"] = df["has_discount"].astype("bool")
+    df["first_discount_title"] = df["first_discount_title"].astype("category")
 
     return df
 
