@@ -844,7 +844,8 @@ with tabs[5]:
                 text=cpy["Campaigns"], textposition="outside",
             )
             apply_layout(fig_cpy, "Unique Discount Campaigns per Year",
-                         xaxis_title="Year", yaxis_title="# Campaigns")
+                         xaxis_title="Year", yaxis_title="# Campaigns",
+                         xaxis_type="category")
             fig_cpy.update_layout(showlegend=False, height=340)
             st.plotly_chart(fig_cpy, use_container_width=True, key="disctype_cpy_bar")
 
