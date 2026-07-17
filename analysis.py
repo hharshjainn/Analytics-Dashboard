@@ -121,7 +121,9 @@ def build_t2o(df: pd.DataFrame, first_orders: pd.DataFrame) -> pd.DataFrame:
         .rename(columns={"created_at": "second_order_date"})
     )
     t2o = first_orders.merge(second, on="customer_id")
-    t2o["days_to_second_order"] = (t2o["second_order_date"] - t2o["first_order_date"]).dt.days
+    t2o["days_to_second_order"] = (
+        t2o["second_order_date"].dt.normalize() - t2o["first_order_date"].dt.normalize()
+    ).dt.days
     return t2o
 
 
@@ -161,7 +163,9 @@ def repeat_purchase_rate(
     window_days: int,
 ) -> tuple[int, int, float]:
     merged = df_orders.merge(first_orders_tbl[["customer_id", "first_order_date"]], on="customer_id")
-    merged["days_since_first"] = (merged["created_at"] - merged["first_order_date"]).dt.days
+    merged["days_since_first"] = (
+        merged["created_at"].dt.normalize() - merged["first_order_date"].dt.normalize()
+    ).dt.days
     repeaters = merged.loc[
         (merged["days_since_first"] > 0) & (merged["days_since_first"] <= window_days),
         "customer_id",
@@ -193,7 +197,9 @@ def build_segment_summary(
 ) -> pd.DataFrame:
     # Pre-merge once outside the loop to avoid N redundant merges
     merged_all = df_orders.merge(first_orders[["customer_id", "first_order_date"]], on="customer_id")
-    merged_all["days_since_first"] = (merged_all["created_at"] - merged_all["first_order_date"]).dt.days
+    merged_all["days_since_first"] = (
+        merged_all["created_at"].dt.normalize() - merged_all["first_order_date"].dt.normalize()
+    ).dt.days
 
     rows = []
     for seg_val, grp in first_orders.groupby(segment_col):
@@ -229,7 +235,9 @@ def build_segment_summary(
 
 def _orders_within_nd(df_orders: pd.DataFrame, first_orders_tbl: pd.DataFrame, n: int) -> pd.Series:
     merged = df_orders.merge(first_orders_tbl[["customer_id", "first_order_date"]], on="customer_id")
-    merged["days_since_first"] = (merged["created_at"] - merged["first_order_date"]).dt.days
+    merged["days_since_first"] = (
+        merged["created_at"].dt.normalize() - merged["first_order_date"].dt.normalize()
+    ).dt.days
     within = merged[merged["days_since_first"].between(0, n)]
     return within.groupby("customer_id").size()
 
@@ -251,7 +259,9 @@ def build_discount_type_summary(
 
     # Pre-merge once
     merged_all = df_orders.merge(discounted[["customer_id", "first_order_date", "_year"]], on="customer_id")
-    merged_all["days_since_first"] = (merged_all["created_at"] - merged_all["first_order_date"]).dt.days
+    merged_all["days_since_first"] = (
+        merged_all["created_at"].dt.normalize() - merged_all["first_order_date"].dt.normalize()
+    ).dt.days
 
     rows = []
     for (title, year), grp in discounted.groupby(
@@ -420,11 +430,15 @@ def build_basket_discount_analysis(
         seg_df = df_orders[df_orders["customer_id"].isin(cids)]
         seg_t2o = t2o[t2o["customer_id"].isin(cids)]["days_to_second_order"]
         _, _, rpr30 = repeat_purchase_rate(seg_df, seg_fo, 30)
+        _, _, rpr60 = repeat_purchase_rate(seg_df, seg_fo, 60)
+        _, _, rpr90 = repeat_purchase_rate(seg_df, seg_fo, 90)
         return {
             "N Customers":        len(seg_fo),
             "Disc Usage (%)":     round(seg_fo["first_order_discount"].mean() * 100, 1),
             "Avg Basket (units)": round(seg_fo["first_basket_size"].mean(), 2),
             "30-day RPR (%)":     round(rpr30, 2),
+            "60-day RPR (%)":     round(rpr60, 2),
+            "90-day RPR (%)":     round(rpr90, 2),
             "Median Days to 2nd": round(float(seg_t2o.median()), 1) if len(seg_t2o) else float("nan"),
         }
 
@@ -470,7 +484,7 @@ def build_basket_segment_detail(
         first_orders[["customer_id", "first_order_date"]], on="customer_id"
     )
     merged_all["days_since_first"] = (
-        merged_all["created_at"] - merged_all["first_order_date"]
+        merged_all["created_at"].dt.normalize() - merged_all["first_order_date"].dt.normalize()
     ).dt.days
 
     rows = []
